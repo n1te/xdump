@@ -157,8 +157,12 @@ class Dumper:
         Relations, that are referenced by given table AND are in the list of fully loaded tables are excluded -
         they are in the dump anyway.
         """
+        if full_tables:
+            template = NON_RECURSIVE_RELATIONS_QUERY + ' AND ccu.table_name NOT IN %(full_tables)s'
+        else:
+            template = NON_RECURSIVE_RELATIONS_QUERY
         related_tables = self.run(
-            NON_RECURSIVE_RELATIONS_QUERY, {'table_name': table_name, 'full_tables': tuple(full_tables)}
+            template, {'table_name': table_name, 'full_tables': tuple(full_tables)}
         )
         return {
             item['foreign_table_name']: RELATED_ITEMS_FULL_QUERY.format(
@@ -173,8 +177,12 @@ class Dumper:
     def write_partial_tables(self, file, config, full_tables):
         for table_name, sql in config.items():
             related_non_recursive_queries = self.get_related_objects_queries(table_name, full_tables)
+            if full_tables:
+                template = RECURSIVE_RELATIONS_QUERY + ' AND ccu.table_name NOT IN %(full_tables)s'
+            else:
+                template = RECURSIVE_RELATIONS_QUERY
             related_tables = self.run(
-                RECURSIVE_RELATIONS_QUERY, {'table_name': table_name, 'full_tables': tuple(full_tables)}
+                template, {'table_name': table_name, 'full_tables': tuple(full_tables)}
             )
             print(related_tables)
             self.write_csv(file, table_name, sql)
@@ -189,7 +197,7 @@ WHERE {foreign_column_name} IN (
     DISTINCT {local_column_name} 
   FROM {local_table} 
   WHERE {local_column_name} IS NOT NULL
-);
+)
 '''
 
 NON_RECURSIVE_RELATIONS_QUERY = '''
@@ -203,7 +211,7 @@ FROM
       ON tc.constraint_name = kcu.constraint_name
     JOIN information_schema.constraint_column_usage AS ccu
       ON ccu.constraint_name = tc.constraint_name
-WHERE constraint_type = 'FOREIGN KEY' AND tc.table_name != ccu.table_name AND tc.table_name = %(table_name)s AND ccu.table_name NOT IN %(full_tables)s;
+WHERE constraint_type = 'FOREIGN KEY' AND tc.table_name != ccu.table_name AND tc.table_name = %(table_name)s
 '''
 RECURSIVE_QUERY_TEMPLATE = '''
 WITH RECURSIVE recursive_cte AS (
@@ -231,5 +239,5 @@ FROM
       ON tc.constraint_name = kcu.constraint_name
     JOIN information_schema.constraint_column_usage AS ccu
       ON ccu.constraint_name = tc.constraint_name
-WHERE constraint_type = 'FOREIGN KEY' AND tc.table_name = ccu.table_name AND tc.table_name = %(table_name)s AND ccu.table_name NOT IN %(full_tables)s;
+WHERE constraint_type = 'FOREIGN KEY' AND tc.table_name = ccu.table_name AND tc.table_name = %(table_name)s
 '''

@@ -21,6 +21,7 @@ WITH RECURSIVE employees_cte AS (
   SELECT * 
   FROM employees
   WHERE id > 3
+  ORDER BY id DESC
 )
 SELECT * FROM employees_cte
 '''
@@ -143,7 +144,8 @@ class TestDump:
         In that case - John Black will not be in the output.
         """
 
-        dumper.write_partial_tables(archive, {'employees': EMPLOYEES_SQL})
+        dumper.write_partial_tables(archive, {'employees': EMPLOYEES_SQL}, [])
+        print(archive.read('dump/data/employees.csv'))
         assert archive.read('dump/data/employees.csv') == b'id,first_name,last_name,manager_id,group_id\n' \
                                                           b'5,John,Snow,3,2\n' \
                                                           b'4,John,Brown,3,2\n' \
