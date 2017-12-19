@@ -20,8 +20,7 @@ WITH RECURSIVE employees_cte AS (
 ), recent_employees AS (
   SELECT * 
   FROM employees
-  ORDER BY id DESC
-  LIMIT 2
+  WHERE id > 3
 )
 SELECT * FROM employees_cte
 '''
@@ -150,3 +149,6 @@ class TestDump:
                                                           b'4,John,Brown,3,2\n' \
                                                           b'3,John,Smith,1,1\n' \
                                                           b'1,John,Doe,,1\n'
+
+    def test_load_related_objects(self, dumper, archive):
+        dumper.write_partial_tables(archive, {'employees': EMPLOYEES_SQL}, ['tickets'])
