@@ -7,7 +7,7 @@ from io import BytesIO
 import attr
 import psycopg2
 from cached_property import cached_property
-from psycopg2.extensions import ISOLATION_LEVEL_SERIALIZABLE
+from psycopg2.extensions import ISOLATION_LEVEL_REPEATABLE_READ
 from psycopg2.extras import RealDictConnection
 
 from .utils import make_options
@@ -49,7 +49,7 @@ class Dumper:
             port=self.port,
             connection_factory=RealDictConnection
         )
-        connection.set_isolation_level(ISOLATION_LEVEL_SERIALIZABLE)
+        connection.set_isolation_level(ISOLATION_LEVEL_REPEATABLE_READ)
         return connection
 
     @cached_property
