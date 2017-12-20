@@ -3,28 +3,12 @@ from unittest.mock import patch
 
 import pytest
 
-from concopy.dump import Dump
-
+from concopy.dump import Dump, RELATED_ITEMS_FULL_QUERY, RECURSIVE_QUERY_TEMPLATE
 
 pytestmark = pytest.mark.usefixtures('schema')
 
 
-EMPLOYEES_SQL = '''
-WITH RECURSIVE employees_cte AS (
-  SELECT * 
-  FROM recent_employees
-  UNION
-  SELECT E.*
-  FROM employees E
-  INNER JOIN employees_cte ON (employees_cte.manager_id = E.id)
-), recent_employees AS (
-  SELECT * 
-  FROM employees
-  WHERE id > 3
-  ORDER BY id DESC
-)
-SELECT * FROM employees_cte
-'''
+EMPLOYEES_SQL = 'WHERE id > 3 ORDER BY id DESC'
 
 
 def assert_schema(schema, dumper):
@@ -143,14 +127,98 @@ class TestDump:
         Here we need to select two latest employees with all related managers.
         In that case - John Black will not be in the output.
         """
-
         dumper.write_partial_tables(archive, {'employees': EMPLOYEES_SQL}, [])
-        print(archive.read('dump/data/employees.csv'))
         assert archive.read('dump/data/employees.csv') == b'id,first_name,last_name,manager_id,group_id\n' \
                                                           b'5,John,Snow,3,2\n' \
                                                           b'4,John,Brown,3,2\n' \
                                                           b'3,John,Smith,1,1\n' \
                                                           b'1,John,Doe,,1\n'
 
-    def test_load_related_objects(self, dumper, archive):
-        dumper.write_partial_tables(archive, {'employees': EMPLOYEES_SQL}, ['tickets'])
+    @pytest.mark.parametrize('partial, full, expected', (
+        # # Groups doesn't need anything else
+        # ({}, ['groups'], {}),
+        # # If there are full table of groups, then there is no need to extra partial load
+        # ({}, ['groups', 'employees'], {}),
+        # # Groups are really full here. The same as 1st case
+        # ({'groups': ''}, [], {}),
+        # ({'groups': 'WHERE id = 2'}, [], {}),
+        # (
+        #     {},
+        #     ['employees'],
+        #     {
+        #         'groups': RELATED_ITEMS_FULL_QUERY.format(
+        #             foreign_table='groups',
+        #             foreign_column_name='id',
+        #             local_table='employees',
+        #             local_column_name='group_id',
+        #         )
+        #     }
+        # ),
+        (
+            {},
+            ['tickets'],
+            {
+                # 'employees': RELATED_ITEMS_FULL_QUERY.format(
+                #     foreign_table='employees',
+                #     foreign_column_name='id',
+                #     local_table='tickets',
+                #     local_column_name='author_id',
+                # ),
+                'employees': RECURSIVE_QUERY_TEMPLATE.format(
+                    table_name='(' + RELATED_ITEMS_FULL_QUERY.format(
+                        foreign_table='employees',
+                        foreign_column_name='id',
+                        local_table='tickets',
+                        local_column_name='author_id',
+                    ) + ')',
+                    local_column_name='manager_id',
+                    foreign_column_name='id',
+                    conditions='WHERE id > 3 ORDER BY id DESC'
+                ),
+                # TODO. Groups should also be loaded for new partial employees
+            }
+        ),
+        # (
+        #     {'employees': 'WHERE id > 3 ORDER BY id DESC'},
+        #     [],
+        #     {
+        #         'groups': RELATED_ITEMS_FULL_QUERY.format(
+        #             foreign_table='groups',
+        #             foreign_column_name='id',
+        #             local_table='(' + RECURSIVE_QUERY_TEMPLATE.format(
+        #                 table_name='employees',
+        #                 local_column_name='manager_id',
+        #                 foreign_column_name='id',
+        #                 conditions='WHERE id > 3 ORDER BY id DESC'
+        #             ) + ')',
+        #             local_column_name='group_id'
+        #         )
+        #     }
+        # ),
+    ))
+    def test_prepare_partial_queries(self, dumper, partial, full, expected):
+        """
+
+        """
+        print(RECURSIVE_QUERY_TEMPLATE.format(
+                    table_name='(' + RELATED_ITEMS_FULL_QUERY.format(
+                        foreign_table='employees',
+                        foreign_column_name='id',
+                        local_table='tickets',
+                        local_column_name='author_id',
+                    ) + ')',
+                    local_column_name='manager_id',
+                    foreign_column_name='id',
+                    conditions='WHERE id > 3 ORDER BY id DESC'
+                ))
+        assert dumper.prepare_partial_queries(partial, full) == expected
+
+    def test_load_related_objects(self, dumper, archive_filename):
+        """
+        All objects, referenced by employees should be loaded as well.
+        """
+        dumper.dump(archive_filename, [], {'employees': EMPLOYEES_SQL})
+        archive = zipfile.ZipFile(archive_filename)
+        assert archive.namelist() == [
+            'dump/schema.sql', 'dump/sequences.sql', 'dump/data/groups.csv', 'dump/data/employees.csv',
+        ]

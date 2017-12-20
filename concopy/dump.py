@@ -24,6 +24,48 @@ SEQUENCES_SQL = '''
 SELECT relname FROM pg_class WHERE relkind = 'S'
 '''
 
+RELATED_ITEMS_FULL_QUERY = '''
+SELECT 
+  * 
+FROM {foreign_table} 
+WHERE {foreign_column_name} IN (
+  SELECT 
+    DISTINCT {local_column_name} 
+  FROM {local_table} 
+  WHERE {local_column_name} IS NOT NULL
+)
+'''
+
+RELATIONS_QUERY = '''
+SELECT
+    tc.constraint_name, tc.table_name, kcu.column_name,
+    ccu.table_name AS foreign_table_name,
+    ccu.column_name AS foreign_column_name
+FROM
+    information_schema.table_constraints AS tc
+    JOIN information_schema.key_column_usage AS kcu
+      ON tc.constraint_name = kcu.constraint_name
+    JOIN information_schema.constraint_column_usage AS ccu
+      ON ccu.constraint_name = tc.constraint_name
+WHERE constraint_type = 'FOREIGN KEY' AND tc.table_name = %(table_name)s
+'''
+RECURSIVE_RELATIONS_QUERY = RELATIONS_QUERY + ' AND tc.table_name = ccu.table_name'
+RECURSIVE_QUERY_TEMPLATE = '''
+WITH RECURSIVE recursive_cte AS (
+  SELECT * 
+  FROM non_recursive_cte
+  UNION
+  SELECT T.*
+  FROM {table_name} T
+  INNER JOIN recursive_cte ON (recursive_cte.{local_column_name} = T.{foreign_column_name})
+), non_recursive_cte AS (
+  SELECT * 
+  FROM {table_name}
+  {conditions}
+)
+SELECT * FROM recursive_cte
+'''
+
 
 class Dump(zipfile.ZipFile):
 
@@ -96,6 +138,7 @@ class Dumper:
             self.write_schema(file)
             self.write_sequences(file)
             self.write_full_tables(file, full_tables)
+            self.prepare_partial_queries(partial_tables, full_tables)
             self.write_partial_tables(file, partial_tables, full_tables)
 
     def write_schema(self, file):
@@ -148,8 +191,53 @@ class Dumper:
         Writes a complete tables dump in CSV format to the archive.
         """
         for table_name in tables:
-            related_partial_queries = self.get_related_objects_queries(table_name, tables)
             self.write_csv(file, table_name, f'SELECT * FROM {table_name}')
+
+    def get_foreign_keys(self, table_name, full_tables=(), only_recursive=None):
+        template = RELATIONS_QUERY
+        if full_tables:
+            template += ' AND ccu.table_name NOT IN %(full_tables)s'
+        if only_recursive:
+            template += ' AND tc.table_name = ccu.table_name'
+        elif only_recursive is False:
+            template += ' AND tc.table_name != ccu.table_name'
+        return self.run(
+            template, {'table_name': table_name, 'full_tables': tuple(full_tables)}
+        )
+
+    def prepare_partial_queries(self, partial_tables, full_tables):
+        result = {}
+        for table in full_tables:
+            for item in self.get_foreign_keys(table, full_tables):
+                result[item['foreign_table_name']] = RELATED_ITEMS_FULL_QUERY.format(
+                    foreign_table=item['foreign_table_name'],
+                    foreign_column_name=item['foreign_column_name'],
+                    local_table=item['table_name'],
+                    local_column_name=item['column_name'],
+                )
+        for table, sql in partial_tables.items():
+            constraints = self.get_foreign_keys(table, full_tables)
+            # TODO. Support multiple constraint. Not only the first one.
+            if any(constraint['foreign_table_name'] == table for constraint in constraints):
+                local_table = RECURSIVE_QUERY_TEMPLATE.format(
+                    table_name=table,
+                    local_column_name=[constraint['column_name'] for constraint in constraints if constraint['foreign_table_name'] == table][0],
+                    foreign_column_name=[constraint['foreign_column_name'] for constraint in constraints if constraint['foreign_table_name'] == table][0],
+                    conditions=sql
+                )
+                local_table = f'({local_table})'
+            else:
+                local_table = table
+            for item in constraints:
+                if item['foreign_table_name'] != table:
+                    result[item['foreign_table_name']] = RELATED_ITEMS_FULL_QUERY.format(
+                        foreign_table=item['foreign_table_name'],
+                        foreign_column_name=item['foreign_column_name'],
+                        local_table=local_table,
+                        local_column_name=item['column_name'],
+                    )
+        print(result)
+        return result
 
     def get_related_objects_queries(self, table_name, full_tables):
         """
@@ -157,13 +245,6 @@ class Dumper:
         Relations, that are referenced by given table AND are in the list of fully loaded tables are excluded -
         they are in the dump anyway.
         """
-        if full_tables:
-            template = NON_RECURSIVE_RELATIONS_QUERY + ' AND ccu.table_name NOT IN %(full_tables)s'
-        else:
-            template = NON_RECURSIVE_RELATIONS_QUERY
-        related_tables = self.run(
-            template, {'table_name': table_name, 'full_tables': tuple(full_tables)}
-        )
         return {
             item['foreign_table_name']: RELATED_ITEMS_FULL_QUERY.format(
                 foreign_table=item['foreign_table_name'],
@@ -171,73 +252,30 @@ class Dumper:
                 local_table=table_name,
                 local_column_name=item['column_name']
             )
-            for item in related_tables
+            for item in self.get_foreign_keys(table_name, full_tables, False)
         }
 
     def write_partial_tables(self, file, config, full_tables):
         for table_name, sql in config.items():
+            foreign_keys = self.get_foreign_keys(table_name, full_tables, only_recursive=True)
+            if foreign_keys:
+                sql = RECURSIVE_QUERY_TEMPLATE.format(
+                    table_name=table_name,
+                    conditions=sql,
+                    local_column_name=foreign_keys[0]['column_name'],
+                    foreign_column_name=foreign_keys[0]['foreign_column_name'],
+                )
             related_non_recursive_queries = self.get_related_objects_queries(table_name, full_tables)
-            if full_tables:
-                template = RECURSIVE_RELATIONS_QUERY + ' AND ccu.table_name NOT IN %(full_tables)s'
-            else:
-                template = RECURSIVE_RELATIONS_QUERY
-            related_tables = self.run(
-                template, {'table_name': table_name, 'full_tables': tuple(full_tables)}
-            )
-            print(related_tables)
+            print(related_non_recursive_queries)
+
+
+            # if full_tables:
+            #     template = RELATIONS_QUERY + ' AND ccu.table_name NOT IN %(full_tables)s'
+            # else:
+            #     template = RELATIONS_QUERY
+            # related_tables = self.run(
+            #     template, {'table_name': table_name, 'full_tables': tuple(full_tables)}
+            # )
             self.write_csv(file, table_name, sql)
 
 
-RELATED_ITEMS_FULL_QUERY = '''
-SELECT 
-  * 
-FROM {foreign_table} 
-WHERE {foreign_column_name} IN (
-  SELECT 
-    DISTINCT {local_column_name} 
-  FROM {local_table} 
-  WHERE {local_column_name} IS NOT NULL
-)
-'''
-
-NON_RECURSIVE_RELATIONS_QUERY = '''
-SELECT
-    tc.constraint_name, tc.table_name, kcu.column_name,
-    ccu.table_name AS foreign_table_name,
-    ccu.column_name AS foreign_column_name
-FROM
-    information_schema.table_constraints AS tc
-    JOIN information_schema.key_column_usage AS kcu
-      ON tc.constraint_name = kcu.constraint_name
-    JOIN information_schema.constraint_column_usage AS ccu
-      ON ccu.constraint_name = tc.constraint_name
-WHERE constraint_type = 'FOREIGN KEY' AND tc.table_name != ccu.table_name AND tc.table_name = %(table_name)s
-'''
-RECURSIVE_QUERY_TEMPLATE = '''
-WITH RECURSIVE recursive_cte AS (
-  SELECT * 
-  FROM non_recursive_cte
-  UNION
-  SELECT T.*
-  FROM {target} T
-  INNER JOIN recursive_cte ON (recursive_cte.{local_column_name} = E.{foreign_column_name})
-), non_recursive_cte AS (
-  SELECT * 
-  FROM {target}
-  WHERE 
-)
-SELECT * FROM recursive_cte
-'''
-RECURSIVE_RELATIONS_QUERY = '''
-SELECT
-    tc.constraint_name, tc.table_name, kcu.column_name,
-    ccu.table_name AS foreign_table_name,
-    ccu.column_name AS foreign_column_name
-FROM
-    information_schema.table_constraints AS tc
-    JOIN information_schema.key_column_usage AS kcu
-      ON tc.constraint_name = kcu.constraint_name
-    JOIN information_schema.constraint_column_usage AS ccu
-      ON ccu.constraint_name = tc.constraint_name
-WHERE constraint_type = 'FOREIGN KEY' AND tc.table_name = ccu.table_name AND tc.table_name = %(table_name)s
-'''
